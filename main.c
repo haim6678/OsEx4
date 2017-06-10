@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/sem.h>
 #include <fcntl.h>
+#include <time.h>
 
 union semun {
     int val;
@@ -21,14 +22,40 @@ struct Queue {
     char *jobs;
 };
 
+
+/* Thread */
+struct thread {
+    int id;                              /* friendly id               */
+    pthread_t pthread;                   /* pointer to actual thread  */
+    struct thpool_ *thpool_p;            /* access to thpool          */
+};
+
+
+/* Threadpool */
+struct thpool_ {
+    struct thread **threads;                  /* pointer to threads        */
+    volatile int num_threads_alive;      /* threads currently alive   */
+    volatile int num_threads_working;    /* threads currently working */
+    pthread_mutex_t thcount_lock;       /* used for thread count etc */
+    struct Queue queue;
+};
+
 void SetVariables();
 
+void CreateSemaphors();
+
+void CreateMemory();
+
+void CreateKeys();
+
+int Keep_on = 1;
 union semun semarg;
 struct Queue queue;
 char *data;
-int semaphoreSemId, readSemId, semaphoreK, writeSemaphoreK;
-int writeSemId, readSemaphoreK, outputFile, shmKey, shmid;
+int semaphoreSemId, readSemId, queueSemaphoreK, writeSemaphoreK;
+int writeSemId, readSemaphoreK,outputSemaphoreK, outputFile, shmKey, shmid;
 int writeSemaphoreDesc, readSemaphoreDesc, semaphoreDesc;
+int internal_count;
 #define SHM_SIZE 4096
 
 int main() {
@@ -40,8 +67,8 @@ int main() {
     struct sembuf sb;
     key_t key;
     int file;
-    int internal_count = 0;
-
+    internal_count = 0;
+    char job;
     queue.location = 0;
     queue.numJobs = 0;
     queue.jobs = (char *) malloc((sizeof(char) * 2));
@@ -54,17 +81,115 @@ int main() {
     CreateMemory();
     CreateKeys();
     CreateSemaphors();
-    file = open("203405386.txt", O_RDWR | O_CREAT | O_TRUNC, 0666);
-    if (file < 0) {
-        perror("failed open file");
+
+    while (Keep_on) {
+
+
+        //read char from memo
+
+        SearchForThread(job);
+    }
+}
+
+void SearchForThread(char job) {
+    pthread_t threadPid;
+    int flag;
+    //wait for thread
+
+    //do the job
+    ExecJob(job, threadPid);
+}
+
+int ExecJob(char job, pthread_t tid) {
+    srand(time(NULL));
+    int writen;
+    char finalDetails[1028];
+    char pidDescription[512];
+    char inCounterDescription[128];
+    int randNum = (rand() % 90) + 10;
+    int numToAddToInternal = 0;
+    if (((job >= 97) && (job <= 101)) || ((job >= 65) && (job <= 69))) {
+        struct timespec time;
+        time.tv_sec = 0;
+        time.tv_nsec = randNum;
+        nanosleep(&time, NULL);
+    }
+    switch (job) {
+        case 'a':
+        case 'A':
+            numToAddToInternal = 1;
+            break;
+        case 'b':
+        case 'B':
+            numToAddToInternal = 2;
+            break;
+        case 'c':
+        case 'C':
+            numToAddToInternal = 3;
+            break;
+        case 'd':
+        case 'D':
+            numToAddToInternal = 4;
+            break;
+        case 'e':
+        case 'E':
+            numToAddToInternal = 5;
+            break;
+        case 'f':
+        case 'F':
+            break;
+        case 'g':
+        case 'G':
+            EndGame();
+            break;
+        case 'h':
+        case 'H':
+            WaitAndEndGame();
+        default:
+            break;
+    }
+    //todo close sem
+    internal_count += numToAddToInternal;
+
+    memset(finalDetails, 0, 1028);
+    memset(pidDescription, 0, 512);
+    memset(inCounterDescription, 0, 128);
+
+    writen = snprintf(inCounterDescription, 128, "%d", numToAddToInternal);
+    if (writen < 0) {
+        perror("failed converting grade to string");
+        //todo handle
+    }
+    writen = snprintf(pidDescription, 512, "%ld", tid);
+    if (writen < 0) {
+        perror("failed converting grade to string");
         //todo handle
     }
 
-    /* make the key: */
-    if ((key = ftok("203405386.txt", 'k')) == -1) {
-        write(STDERR_FILENO, "failed ftok", strlen("failed ftok"));
-        exit(1);
+    //create one long string
+    memset(finalDetails, 0, 1028);
+    strcpy(finalDetails, "thread identifier is ");
+    strcat(finalDetails, pidDescription);
+    strcat(finalDetails, " ");
+    strcat(finalDetails, "and internal_count is ");
+    strcat(finalDetails, inCounterDescription);
+    strcat(finalDetails, "\n");
+
+    //write this string
+    writen = write(outputFile, finalDetails, strlen(finalDetails));
+    if (writen < 0) {
+        perror("failed to write to file");
+        //todo handle
     }
+
+    //todo release semaphore
+}
+
+void EndGame() {
+
+}
+
+void WaitAndEndGame() {
 
 }
 
@@ -141,7 +266,7 @@ void CreateMemory() {
     }
 
     //create key for memory.
-    if ((shmKey = ftok("203405386.txt", 'H')) == -1) {
+    if ((shmKey = ftok("203405386.txt", 'K')) == -1) {
         perror("failed ftok");
         //todo handle
     }
