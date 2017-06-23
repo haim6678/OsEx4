@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <stdio.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -54,6 +53,8 @@ void CreateSemaphors();
 
 void ExecJob(char job, pthread_t tid);
 
+void SetSems();
+
 void CreateMemory();
 
 void CreatePool();
@@ -67,6 +68,8 @@ void ListenTOjobs();
 void WaitAndEndGame();
 
 void WriteToResultFile();
+
+void ClearResources();
 
 int Keep_on = 1;
 union semun semarg;
@@ -85,13 +88,7 @@ int internal_count;
  */
 int main() {
     //declare variables
-    int shmid;
-    char *data;
-    char move;
-    union semun arg;
-    struct semid_ds buf;
-    key_t key;
-    int file;
+
     internal_count = 0;
     queue.location = 0;
     queue.numJobs = 0;
@@ -103,13 +100,8 @@ int main() {
     }
     queue.size = 2;
 
-    //init all needed fields
-    SetVariables();
+    SetSems();
     CreateMemory();
-    CreateKeys();
-    CreateSemaphors();
-    CreatePool();
-
 
     //get the jobs from shared memory
     ListenTOjobs();
@@ -192,29 +184,41 @@ void ListenTOjobs() {
         sb.sem_op = 1;
         sb.sem_flg = SEM_UNDO;
         //release inner
-        if (semop(semaphoreSemId, &sb, 1) < 0) {
-            perror("faild semop");
-            ClearResources();
-            exit(0);
-        }
-        //release writer semaphore in the other proccess
-        if (semop(writeSemId, &sb, 1) < 0) {
-            perror("faild semop");
-            ClearResources();
-            exit(0);
-        }
 
         if ((job == 'g') || (job == 'G')) {
             EndGame();
+            SetSems();
         } else if ((job == 'h') || (job == 'H')) {
             WaitAndEndGame();
+            SetSems();
         } else {
             EnterJobToQueue(job);
+            if (semop(semaphoreSemId, &sb, 1) < 0) {
+                perror("faild semop");
+                ClearResources();
+                exit(0);
+            }
+            //release writer semaphore in the other proccess
+            if (semop(writeSemId, &sb, 1) < 0) {
+                perror("faild semop");
+                ClearResources();
+                exit(0);
+            }
         }
+
     }
 }
 
 #pragma clang diagnostic pop
+
+void SetSems() {
+
+    //init all needed fields
+    SetVariables();
+    CreateKeys();
+    CreateSemaphors();
+    CreatePool();
+}
 
 void *ThreadFunc() {
     char job = '#';
@@ -222,6 +226,7 @@ void *ThreadFunc() {
         //get job from queue
         job = NextJob();
         if (job != '#') {
+            printf("got gob: %c \n",job);
             //exec it
             ExecJob(job, pthread_self());
         }
@@ -360,6 +365,7 @@ void WriteToResultFile() {
     strcat(finalDetails, inCounterDescription);
     strcat(finalDetails, "\n");
 
+    printf("write to file %d\n",outputFile);
     //write this string
     writen = write(outputFile, finalDetails, strlen(finalDetails));
     if (writen < 0) {
@@ -454,7 +460,6 @@ void EndGame() {
     WriteToResultFile();
     //clear all resources
     ClearResources();
-    exit(0); //todo exit??
 }
 
 /**
@@ -469,14 +474,14 @@ void WaitAndEndGame() {
 
     WriteToResultFile();
     ClearResources();
-    exit(0); //todo exit??
 }
 
 /**
  * the operation - create the 5 threads
  */
 void CreatePool() {
-    int i;
+
+    int i = 0;
     pthread_t tid;
     pthread_mutexattr_t atrr;
 
@@ -497,9 +502,6 @@ void CreatePool() {
         exit(1);
     }
 
-    if (pthread_mutex_lock(&(threadPool.counterLock)) != 0) {
-        perror("failed locking mutex");
-    }
     //the counter lock
     if ((pthread_mutexattr_init(&(threadPool.counterLockAttr)) < 0)) {
         perror("failed init mutex attr");
@@ -517,6 +519,7 @@ void CreatePool() {
         exit(1);
     }
 
+
     //run in loop and create them
     for (i = 0; i < 5; i++) {
         if (pthread_create(&tid, NULL, &ThreadFunc, NULL) == -1) {
@@ -525,6 +528,7 @@ void CreatePool() {
         }
         threadPool.threads[i].pthreadId = tid;
     }
+
 }
 
 /**
