@@ -19,6 +19,8 @@ union semun {
 union semun semarg;
 #define SHM_SIZE 4096
 char *memory;
+int writeId,thirdMutexId,readId;
+key_t  memKey,thirdKey;
 
 void EndProgram();
 
@@ -37,39 +39,70 @@ int main() {
     struct semid_ds buf;
     struct sembuf sb;
     int semid;
+
+    /*write semaphore*/
+
     //create new key for the first semaphore.
-    if ((writerKey = ftok("writerSem.c", 'A')) == -1) {
-        write(STDERR_FILENO, "failed ftok", strlen("failed ftok"));
+    if ((writerKey = ftok("writeSemaphore.c", 'A')) == -1) {
+        perror("failed ftok");
         exit(1);
     }
 
     //try getting the semaphore
-    semid = semget(writerKey, 1, IPC_CREAT | IPC_EXCL | 0666);
-    if (semid < 0) { /* someone else created it first */
-        semid = semget(writerKey, 1, 0); /* get the id */
-        if (semid < 0) {
+    writeId = semget(writerKey, 1, IPC_CREAT | IPC_EXCL | 0666);
+    if (writeId < 0) { /* someone else created it first */
+        writeId = semget(writerKey, 1, 0); /* get the id */
+        if (writeId < 0) {
             perror("failed creating semaphore");
-            //todo release and exit
+            exit(0);
         }
     }
 
-    if ((writerKey = ftok("writerSem.c", 'A')) == -1) {
+    /*read semaphore*/
+
+    if ((readerKey = ftok("readSemaphore.c", 'B')) == -1) {
         write(STDERR_FILENO, "failed ftok", strlen("failed ftok"));
         exit(1);
     }
-    /* make the key: */
-    if ((key = ftok("203405386.txt", 'k')) == -1) {
-        write(STDERR_FILENO, "failed ftok", strlen("failed ftok"));
+    //try getting the semaphore
+    readId = semget(readerKey, 1, IPC_CREAT | IPC_EXCL | 0666);
+    if (readId < 0) { /* someone else created it first */
+        readId = semget(readerKey, 1, 0); /* get the id */
+        if (readId < 0) {
+            perror("failed creating semaphore");
+            exit(0);
+        }
+    }
+
+    /*third(inner) semaphore*/
+
+    if ((thirdKey = ftok("semaphore.c", 'C')) == -1) {
+        perror("failed creating semaphore");
+        exit(0);
+    }
+    //try getting the semaphore
+    thirdMutexId = semget(thirdKey, 1, IPC_CREAT | IPC_EXCL | 0666);
+    if ( thirdMutexId  < 0) { /* someone else created it first */
+        thirdMutexId = semget(thirdKey, 1, 0); /* get the id */
+        if (thirdMutexId < 0) {
+            perror("failed creating semaphore");
+            exit(0);
+        }
+    }
+
+    /* the memoty key */
+    if ((memKey = ftok("203405386.txt", 'K')) == -1) {
+        perror("failed ftok");
         exit(1);
     }
 
-    /* connect to (and possibly create) the segment: */
-    if ((shmid = shmget(key, SHM_SIZE, 0644 | IPC_CREAT)) == -1) {
+    /* connect to segment */
+    if ((shmid = shmget(memKey, SHM_SIZE, 0644 | IPC_CREAT)) == -1) {
         perror("shmget");
         exit(1);
     }
 
-    /* attach to the segment to get a pointer to it: */
+    /* attach to segment */
     data = shmat(shmid, NULL, 0);
     memory = data;
     if (data == (char *) (-1)) {
@@ -77,52 +110,60 @@ int main() {
         exit(1);
     }
 
-    //try getting the semaphore
-    semid = semget(writerKey, 1, IPC_CREAT | IPC_EXCL | 0666);
 
-    if (semid < 0) { /* someone else created it first */
-        semid = semget(writerKey, 1, 0); /* get the id */
-        if (semid < 0) {
-            perror("failed creating semaphore");
-            //todo release and exit
-        }
-    }
-
-
-    if (write(STDOUT_FILENO, "Please enter request code\n", strlen("Please enter request code\n")) < 0) {
-        perror("failed to write to screen");
-        //todo release and exit
-    }
     do {
-        if (read(STDIN_FILENO, &move, 1) < 0) {
+        /*ask user for input*/
+        if (write(STDOUT_FILENO, "Please enter request code\n", strlen("Please enter request code\n")) < 0) {
+            perror("failed to write to screen");
+            exit(0);
+        }
+
+        /*if (read(STDIN_FILENO, &move, 1) < 0) {
             perror("failed to read from stdin");
             //todo ReleaseMemoryEndExit();
-        }
+        }*/
+        char dummy;
+        scanf("%c%c",&move,&dummy);
         if (move == 'i') {
             EndProgram();
         }else{
+
+            sb.sem_num = 0;
             sb.sem_op = -1;
             sb.sem_flg = SEM_UNDO;
-            if (semop(semid, &sb, 1) == -1) {
-                perror("failed acting semaphore action");
-                //todo ReleaseMemoryEndExit();
-            }
-            //close writer
-            //closer reader
 
-            //relese reader
-            //release writer in server!
-            //write to memory
-            printf("unlock");
-            //sb.sem_op = 1;
-            //if (semop(semid, &sb, 1) == -1) {
-              //  perror("failed acting semaphor action");
-                //todo ReleaseMemoryEndExit();
-            //}
+            //try close(=wait) writer
+            if(semop(writeId, &sb, 1)<0){
+                perror("faild semop");
+                EndProgram();
+            }
+            //close third(inner) sem
+            if(semop(thirdMutexId,&sb,1)<0){
+                perror("faild semop");
+                EndProgram();
+            }
+
+            *data = move;
+            //add item
+
+            sb.sem_num = 0;
+            sb.sem_op = 1;
+            sb.sem_flg = SEM_UNDO;
+
+            //release third sem
+            if(semop(thirdMutexId,&sb,1)<0){
+                perror("faild semop");
+                EndProgram();
+            }
+
+            // release reader
+            if(semop(readId, &sb, 1)<0){
+                perror("faild semop");
+                EndProgram();
+            }
+
         }
     } while (1);
-
-
     return 0;
 }
 
@@ -130,4 +171,9 @@ int main() {
 
 void EndProgram() {
 
+    if(shmdt(memory)<0){
+        perror("failed detach memory");
+    }
+
+    exit(0);
 }

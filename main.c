@@ -9,6 +9,7 @@
 #include <sys/sem.h>
 #include <fcntl.h>
 #include <time.h>
+#include <pthread.h>
 
 union semun {
     int val;
@@ -23,97 +24,255 @@ struct Queue {
 };
 
 
-/* Thread */
+// Thread struct
 struct thread {
-    int id;                              /* friendly id               */
-    pthread_t pthread;                   /* pointer to actual thread  */
-    struct thpool_ *thpool_p;            /* access to thpool          */
+    int id;
+    pthread_t pthreadId;
+    struct thpool_ *thpool_p;
 };
 
 
 /* Threadpool */
-struct thpool_ {
-    struct thread **threads;                  /* pointer to threads        */
-    volatile int num_threads_alive;      /* threads currently alive   */
-    volatile int num_threads_working;    /* threads currently working */
-    pthread_mutex_t thcount_lock;       /* used for thread count etc */
+struct thpool {
+    struct thread threads[5];
+    volatile int num_threads_alive;
+    volatile int num_threads_working;
+    pthread_mutex_t queueAccessLock;
+    pthread_mutexattr_t queueLOckAttr;
+    pthread_mutex_t counterLock;
+    pthread_mutexattr_t counterLockAttr;
     struct Queue queue;
 };
 
 void SetVariables();
 
+char NextJob();
+
+void *ThreadFunc();
+
 void CreateSemaphors();
+
+void ExecJob(char job, pthread_t tid);
 
 void CreateMemory();
 
+void CreatePool();
+
 void CreateKeys();
+
+void EndGame();
+
+void ListenTOjobs();
+
+void WaitAndEndGame();
+
+void WriteToResultFile();
 
 int Keep_on = 1;
 union semun semarg;
+struct sembuf sb;
 struct Queue queue;
+struct thpool threadPool;
 char *data;
 int semaphoreSemId, readSemId, queueSemaphoreK, writeSemaphoreK;
-int writeSemId, readSemaphoreK,outputSemaphoreK, outputFile, shmKey, shmid;
-int writeSemaphoreDesc, readSemaphoreDesc, semaphoreDesc;
+int writeSemId, readSemaphoreK, outputSemaphoreK, outputFile, shmKey, shmid;
+int writeSemaphoreDesc, readSemaphoreDesc, semaphoreDesc, semaphoreK;
 int internal_count;
 #define SHM_SIZE 4096
 
+/**
+ * the operation - runs the program
+ */
 int main() {
+    //declare variables
     int shmid;
     char *data;
     char move;
     union semun arg;
     struct semid_ds buf;
-    struct sembuf sb;
     key_t key;
     int file;
     internal_count = 0;
-    char job;
     queue.location = 0;
     queue.numJobs = 0;
+    //make place for jobs
     queue.jobs = (char *) malloc((sizeof(char) * 2));
     if (queue.jobs == NULL) {
-        //todo handle
+        perror("failed to allocat place");
+        exit(0);
     }
     queue.size = 2;
 
+    //init all needed fields
     SetVariables();
     CreateMemory();
     CreateKeys();
     CreateSemaphors();
+    CreatePool();
 
-    while (Keep_on) {
 
+    //get the jobs from shared memory
+    ListenTOjobs();
 
-        //read char from memo
+    return 0;
+}
 
-        SearchForThread(job);
+/**
+ * the input - a char that represent the job
+ * the operation - after jetting a job from memory
+ *                  enter the job to the queue
+ */
+void EnterJobToQueue(char job) {
+
+    int tepmSize;
+    //lock the access for one thread
+    if (pthread_mutex_lock(&(threadPool.queueAccessLock)) != 0) {
+        perror("failed locking mutex");
+    }
+    //if need inlarge the quque
+    if (queue.size == (queue.location - 1)) {
+        tepmSize = queue.size;
+        tepmSize *= 2;
+        queue.jobs = realloc(queue.jobs, sizeof(char) * tepmSize);
+        queue.size = tepmSize;
+    }
+
+    //enter to queue
+    queue.jobs[queue.location] = job;
+    queue.numJobs++;
+    //release the access
+    if (pthread_mutex_unlock(&(threadPool.queueAccessLock)) != 0) {
+        perror("failed locking mutex");
     }
 }
 
-void SearchForThread(char job) {
-    pthread_t threadPid;
-    int flag;
-    //wait for thread
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-noreturn"
 
-    //do the job
-    ExecJob(job, threadPid);
+/**
+ * the operation - wait until we have a message to read
+ *                  then read it and input to queue
+ */
+void ListenTOjobs() {
+    char job;
+
+    while (1) {//todo when to finish?
+        //get the jobs from memory
+        //init vals for action
+        sb.sem_num = 0;
+        sb.sem_op = -1;
+        sb.sem_flg = SEM_UNDO;
+        //close the full(=reader) semaphore until there is data inside
+        if (semop(readSemId, &sb, 1) < 0) {
+            perror("faild semop");
+            ClearResources();
+            exit(0);
+        }
+        //now there is data inside
+        //close inner semaphore and prevent from other to read or write
+        if (semop(semaphoreSemId, &sb, 1) < 0) {
+            perror("faild semopp");
+            ClearResources();
+            exit(0);
+        }
+
+        //get the job
+        job = *data;
+
+
+        semarg.val = 0;
+        if (semctl(readSemId, 0, SETVAL, semarg) < 0) {
+            perror("failed to set semaphore val");
+            ClearResources();
+            exit(0);
+        }
+
+        //init vals for release
+        sb.sem_num = 0;
+        sb.sem_op = 1;
+        sb.sem_flg = SEM_UNDO;
+        //release inner
+        if (semop(semaphoreSemId, &sb, 1) < 0) {
+            perror("faild semop");
+            ClearResources();
+            exit(0);
+        }
+        //release writer semaphore in the other proccess
+        if (semop(writeSemId, &sb, 1) < 0) {
+            perror("faild semop");
+            ClearResources();
+            exit(0);
+        }
+
+        if ((job == 'g') || (job == 'G')) {
+            EndGame();
+        } else if ((job == 'h') || (job == 'H')) {
+            WaitAndEndGame();
+        } else {
+            EnterJobToQueue(job);
+        }
+    }
 }
 
-int ExecJob(char job, pthread_t tid) {
+#pragma clang diagnostic pop
+
+void *ThreadFunc() {
+    char job = '#';
+    while (job != '$') {
+        //get job from queue
+        job = NextJob();
+        if (job != '#') {
+            //exec it
+            ExecJob(job, pthread_self());
+        }
+    }
+
+    WriteToResultFile();
+    pthread_exit((void *) 0);
+}
+
+/**
+ * the output - the next job in queue or # if there isn't one
+ * the operation- gets the job from queue
+ */
+char NextJob() {
+    char temp = '#';
+
+    //lock the access to queue
+    if (pthread_mutex_lock(&(threadPool.queueAccessLock)) != 0) {
+        perror("failed locking mutex");
+        ClearResources();
+        exit(0);
+    }
+    //get the job
+    if (queue.numJobs > 0) {
+        temp = queue.jobs[queue.location];
+        queue.location++;
+        queue.numJobs--;
+    }
+    //release the lock
+    if (pthread_mutex_unlock(&(threadPool.queueAccessLock)) != 0) {
+        perror("failed unlocking mutex");
+    }
+    return temp;
+}
+
+/**
+ * the input - the job to execute and the tid number
+ * the operation - execute the curr job
+ */
+void ExecJob(char job, pthread_t tid) {
+    //init values
     srand(time(NULL));
-    int writen;
-    char finalDetails[1028];
-    char pidDescription[512];
-    char inCounterDescription[128];
     int randNum = (rand() % 90) + 10;
-    int numToAddToInternal = 0;
+    int numToAddToInternal = -1;
     if (((job >= 97) && (job <= 101)) || ((job >= 65) && (job <= 69))) {
         struct timespec time;
         time.tv_sec = 0;
         time.tv_nsec = randNum;
         nanosleep(&time, NULL);
     }
+    //check what is the gob the execute
     switch (job) {
         case 'a':
         case 'A':
@@ -137,37 +296,63 @@ int ExecJob(char job, pthread_t tid) {
             break;
         case 'f':
         case 'F':
+            WriteToResultFile();
             break;
-        case 'g':
-        case 'G':
-            EndGame();
-            break;
-        case 'h':
-        case 'H':
-            WaitAndEndGame();
         default:
             break;
     }
-    //todo close sem
-    internal_count += numToAddToInternal;
 
+    if (numToAddToInternal != -1) {
+        //lock access to number
+        if (pthread_mutex_lock(&(threadPool.counterLock)) != 0) {
+            perror("failed locking mutex");
+        }
+
+        internal_count += numToAddToInternal;
+
+        if (pthread_mutex_unlock(&(threadPool.counterLock)) != 0) {
+            perror("failed locking mutex");
+        }
+    }
+}
+
+void WriteToResultFile() {
+
+    //init buffers
+    int writen;
+    pthread_t tid = pthread_self();
+    char finalDetails[1028];
+    char pidDescription[512];
+    char inCounterDescription[128];
     memset(finalDetails, 0, 1028);
     memset(pidDescription, 0, 512);
     memset(inCounterDescription, 0, 128);
 
-    writen = snprintf(inCounterDescription, 128, "%d", numToAddToInternal);
-    if (writen < 0) {
-        perror("failed converting grade to string");
-        //todo handle
+    //lock access to number
+    if (pthread_mutex_lock(&(threadPool.counterLock)) != 0) {
+        perror("failed locking mutex");
     }
+    //write internal count to buffer
+    writen = snprintf(inCounterDescription, 128, "%d", internal_count);
+    if (writen < 0) {
+        perror("failed converting number to string");
+        ClearResources();
+        exit(0);
+    }
+    //lock access to number
+    if (pthread_mutex_unlock(&(threadPool.counterLock)) != 0) {
+        perror("failed locking mutex");
+    }
+
+    //write tid to buffer
     writen = snprintf(pidDescription, 512, "%ld", tid);
     if (writen < 0) {
-        perror("failed converting grade to string");
-        //todo handle
+        perror("failed converting number to string");
+        ClearResources();
+        exit(0);
     }
 
     //create one long string
-    memset(finalDetails, 0, 1028);
     strcpy(finalDetails, "thread identifier is ");
     strcat(finalDetails, pidDescription);
     strcat(finalDetails, " ");
@@ -179,65 +364,243 @@ int ExecJob(char job, pthread_t tid) {
     writen = write(outputFile, finalDetails, strlen(finalDetails));
     if (writen < 0) {
         perror("failed to write to file");
-        //todo handle
+        ClearResources();
+        exit(0);
+    }
+}
+
+void ClearResources() {
+    /*delete semaphores*/
+
+    //delete write semaphore
+    if (semctl(writeSemId, 0, IPC_RMID, 0) < 0) {
+        perror("failed to delete semaphore");
+        ClearResources();
+        exit(0);
+    }
+    //delete read semaphore
+    if (semctl(readSemId, 0, IPC_RMID, 0) < 0) {
+        perror("failed to delete semaphore");
+        ClearResources();
+        exit(0);
+    }
+    //delete inner semaphore
+    if (semctl(semaphoreSemId, 0, IPC_RMID, 0) < 0) {
+        perror("failed to delete semaphore");
     }
 
-    //todo release semaphore
+    /*delete files*/
+
+    //close first file
+    if (close(readSemaphoreDesc) < 0) {
+        perror("failed close file");
+    }
+    if (unlink("readSemaphore.c") < 0) {
+        perror("failed to delete file");
+    }
+
+    //close sec file
+    if (close(writeSemaphoreDesc) < 0) {
+        perror("failed close file");
+    }
+    if (unlink("writeSemaphore.c") < 0) {
+        perror("failed to delete file");
+    }
+
+    //close third file
+    if (close(semaphoreDesc) < 0) {
+        perror("failed close file");
+    }
+    if (unlink("semaphore.c") < 0) {
+        perror("failed to delete file");
+    }
+
+    /* delete semaphores*/
+
+    //first mutex
+    if (pthread_mutex_destroy(&(threadPool.counterLock)) < 0) {
+        perror("failed destroy mutex");
+    }
+
+    //sec mutex
+    if (pthread_mutex_destroy(&(threadPool.queueAccessLock)) < 0) {
+        perror("failed destroy mutex");
+    }
+
+    if (pthread_mutexattr_destroy(&(threadPool.counterLockAttr)) < 0) {
+        perror("failed destroy mutex");
+    }
+    if (pthread_mutexattr_destroy(&(threadPool.queueLOckAttr)) < 0) {
+        perror("failed destroy mutex");
+    }
 }
 
+/**
+ * the operation - end the game
+ */
 void EndGame() {
 
+    //end all threads
+    int i = 0;
+    for (i; i < 5; i++) {
+        if (pthread_cancel(threadPool.threads[i].pthreadId) < 0) {
+            perror("failed to cancel thread");
+            ClearResources();
+            exit(0);
+        }
+    }
+
+    //write the file the result
+    WriteToResultFile();
+    //clear all resources
+    ClearResources();
+    exit(0); //todo exit??
 }
 
+/**
+ * the operation -wait for other threads and then end the game
+ */
 void WaitAndEndGame() {
 
+    int i = 0;
+    for (i; i < 5; i++) {
+        EnterJobToQueue('$');
+    }
+
+    WriteToResultFile();
+    ClearResources();
+    exit(0); //todo exit??
 }
 
+/**
+ * the operation - create the 5 threads
+ */
+void CreatePool() {
+    int i;
+    pthread_t tid;
+    pthread_mutexattr_t atrr;
+
+    //the queue lock
+    if ((pthread_mutexattr_init(&(threadPool.queueLOckAttr)) < 0)) {
+        perror("failed init mutex attr");
+        exit(1);
+    }
+
+    //set the mutex attr.
+    if ((pthread_mutexattr_settype(&(threadPool.queueLOckAttr), PTHREAD_MUTEX_ERRORCHECK)) < 0) {
+        perror("failed setting mutex attr");
+        exit(1);
+    }
+    //init the mutex
+    if (pthread_mutex_init((&threadPool.queueAccessLock), (&(threadPool.queueLOckAttr))) != 0) {
+        perror("faile creating mutex");
+        exit(1);
+    }
+
+    if (pthread_mutex_lock(&(threadPool.counterLock)) != 0) {
+        perror("failed locking mutex");
+    }
+    //the counter lock
+    if ((pthread_mutexattr_init(&(threadPool.counterLockAttr)) < 0)) {
+        perror("failed init mutex attr");
+        exit(1);
+    }
+
+    //set the mutex attr.
+    if ((pthread_mutexattr_settype(&(threadPool.counterLockAttr), PTHREAD_MUTEX_ERRORCHECK)) < 0) {
+        perror("failed setting mutex attr");
+        exit(1);
+    }
+
+    if (pthread_mutex_init((&threadPool.counterLock), (&(threadPool.counterLockAttr))) != 0) {
+        perror("faile creating mutex");
+        exit(1);
+    }
+
+    //run in loop and create them
+    for (i = 0; i < 5; i++) {
+        if (pthread_create(&tid, NULL, &ThreadFunc, NULL) == -1) {
+            perror("failed creating thread");
+            exit(1);
+        }
+        threadPool.threads[i].pthreadId = tid;
+    }
+}
+
+/**
+ * the operation - create all 3 semaphors for the program
+ */
 void CreateSemaphors() {
-    semarg.val = 1;
+
+
+    /*the write semaphore*/
+
     //try getting the semaphore
     writeSemId = semget(writeSemaphoreK, 1, IPC_CREAT | IPC_EXCL | 0666);
     if (writeSemId < 0) { /* someone else created it first */
         writeSemId = semget(writeSemaphoreK, 1, 0); /* get the id */
+        int err = semctl(writeSemId, 0, IPC_RMID, 0);/*delete nad recreate*/
+        writeSemId = semget(writeSemaphoreK, 1, IPC_CREAT | IPC_EXCL | 0666);
         if (writeSemId < 0) {
             perror("failed creating semaphore");
             //todo release and exit
         }
     }
-    if ((semctl(writeSemId, 0, SETVAL, semarg)) != 0) {
-        perror("failed to set semaphor val");
-        //todo handle
-    }
+
+
+    /*read semaphore*/
 
     //try getting the semaphore
     readSemId = semget(readSemaphoreK, 1, IPC_CREAT | IPC_EXCL | 0666);
     if (readSemId < 0) { /* someone else created it first */
         readSemId = semget(readSemaphoreK, 1, 0); /* get the id */
+        int err = semctl(readSemId, 0, IPC_RMID, 0); /*delete nad recrate*/
+        readSemId = semget(readSemaphoreK, 1, IPC_CREAT | IPC_EXCL | 0666);
         if (readSemId < 0) {
             perror("failed creating semaphore");
             //todo release and exit
         }
     }
-    if ((semctl(readSemId, 0, SETVAL, semarg)) != 0) {
-        perror("failed to set semaphor val");
-        //todo handle
-    }
+
+
+    /*third semaphore*/
 
     //try getting the semaphore
     semaphoreSemId = semget(semaphoreK, 1, IPC_CREAT | IPC_EXCL | 0666);
     if (semaphoreSemId < 0) { /* someone else created it first */
         semaphoreSemId = semget(semaphoreK, 1, 0); /* get the id */
+        int err = semctl(semaphoreSemId, 0, IPC_RMID, 0); /*delete nad recrate*/
+        semaphoreSemId = semget(semaphoreK, 1, IPC_CREAT | IPC_EXCL | 0666);
         if (semaphoreSemId < 0) {
             perror("failed creating semaphore");
             //todo release and exit
         }
     }
-    if ((semctl(semaphoreSemId, 0, SETVAL, semarg)) != 0) {
-        perror("failed to set semaphor val");
-        //todo handle
+
+    //set their vals
+    semarg.val = 1;
+    if (semctl(writeSemId, 0, SETVAL, semarg) < 0) {
+        perror("failed to set semaphore val");
+        //todo handel
     }
+
+    semarg.val = 1;
+    if (semctl(semaphoreSemId, 0, SETVAL, semarg) < 0) {
+        perror("failed to set semaphore val");
+        //todo handel
+    }
+
+    semarg.val = 0;
+    if (semctl(readSemId, 0, SETVAL, semarg) < 0) {
+        perror("failed to set semaphore val");
+        //todo handel
+    }
+
 }
 
+/**
+ * the operation - creates keys for memory and semaphores
+ */
 void CreateKeys() {
     //create new key for the shared memory.
     if ((writeSemaphoreK = ftok("writeSemaphore.c", 'A')) == -1) {
@@ -258,49 +621,55 @@ void CreateKeys() {
     }
 }
 
+/**
+ * the operation - create shared memory
+ */
 void CreateMemory() {
     //create the output file.
-    if ((outputFile = open("203405386.txt", O_RDWR | O_CREAT | O_APPEND, 0666)) == -1) {
+    if ((outputFile = open("203405386.txt", O_RDWR | O_CREAT, 0666)) == -1) {
         perror("failed open file");
-        //todo handle
+        exit(0);
     }
 
     //create key for memory.
     if ((shmKey = ftok("203405386.txt", 'K')) == -1) {
         perror("failed ftok");
-        //todo handle
+        exit(0);
     }
     //create  shared memory.
     if ((shmid = shmget(shmKey, SHM_SIZE, 0644 | IPC_CREAT)) == -1) {
         perror("failed create memory");
-        //todo handle
+        exit(0);
     }
     //attach to  memroy.
     data = shmat(shmid, NULL, 0644);
-    if ((*data) == (char *) (-1)) {
+    if (data == (char *) (-1)) {
         perror("failed attached to memory");
-        //todo handle
+        exit(0);
     }
 
 }
 
+/**
+ * the operation - open relevat files
+ */
 void SetVariables() {
     //create  semaphore key.
     if ((writeSemaphoreDesc = open("writeSemaphore.c", O_RDWR | O_CREAT, 0666)) == -1) {
         perror("failed open file");
-        //todo handle
+        exit(0);
     }
 
     //create sec semaphore key.
     if ((readSemaphoreDesc = open("readSemaphore.c", O_RDWR | O_CREAT, 0666)) == -1) {
         perror("failed open file");
-        //todo handle
+        exit(0);
     }
 
     //create third semaphore.
     if ((semaphoreDesc = open("semaphore.c", O_RDWR | O_CREAT, 0666)) == -1) {
         perror("failed open file");
-        //todo handle
+        exit(0);
     }
 
 }
