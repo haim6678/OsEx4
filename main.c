@@ -10,6 +10,8 @@
 #include <time.h>
 #include <pthread.h>
 
+
+//declare all the vars
 union semun {
     int val;
     struct semid_ds *buf;
@@ -51,6 +53,8 @@ void *ThreadFunc();
 
 void CreateSemaphors();
 
+void CounterLockSet();
+
 void ExecJob(char job, pthread_t tid);
 
 void SetSems();
@@ -71,12 +75,15 @@ void WriteToResultFile();
 
 void ClearResources();
 
+int numThredFinishe = 0;
 int Keep_on = 1;
 union semun semarg;
 struct sembuf sb;
 struct Queue queue;
 struct thpool threadPool;
 char *data;
+pthread_mutex_t countFinishedLock;
+pthread_mutexattr_t countFinishedAttr;
 int semaphoreSemId, readSemId, queueSemaphoreK, writeSemaphoreK;
 int writeSemId, readSemaphoreK, outputSemaphoreK, outputFile, shmKey, shmid;
 int writeSemaphoreDesc, readSemaphoreDesc, semaphoreDesc, semaphoreK;
@@ -92,6 +99,9 @@ int main() {
     internal_count = 0;
     queue.location = 0;
     queue.numJobs = 0;
+
+
+    CounterLockSet();
     //make place for jobs
     queue.jobs = (char *) malloc((sizeof(char) * 2));
     if (queue.jobs == NULL) {
@@ -107,6 +117,28 @@ int main() {
     ListenTOjobs();
 
     return 0;
+}
+
+/**
+ * the operation - define the num thread counter mutex
+ */
+void CounterLockSet() {
+    //the queue lock
+    if ((pthread_mutexattr_init(&(countFinishedAttr)) < 0)) {
+        perror("failed init mutex attr");
+        exit(1);
+    }
+
+    //set the mutex attr.
+    if ((pthread_mutexattr_settype(&(countFinishedAttr), PTHREAD_MUTEX_ERRORCHECK)) < 0) {
+        perror("failed setting mutex attr");
+        exit(1);
+    }
+    //init the mutex
+    if (pthread_mutex_init((&countFinishedLock), (&(threadPool.queueLOckAttr))) != 0) {
+        perror("faile creating mutex");
+        exit(1);
+    }
 }
 
 /**
@@ -137,9 +169,6 @@ void EnterJobToQueue(char job) {
         perror("failed locking mutex");
     }
 }
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wmissing-noreturn"
 
 /**
  * the operation - wait until we have a message to read
@@ -209,8 +238,10 @@ void ListenTOjobs() {
     }
 }
 
-#pragma clang diagnostic pop
 
+/**
+ * the operation - sets all the semaphore and mutex
+ */
 void SetSems() {
 
     //init all needed fields
@@ -220,18 +251,30 @@ void SetSems() {
     CreatePool();
 }
 
+/**
+ * the operation - the function that the thread will get when he starts
+ */
 void *ThreadFunc() {
     char job = '#';
     while (job != '$') {
         //get job from queue
         job = NextJob();
-        if (job != '#') {
-            printf("got gob: %c \n",job);
+
+        if ((job != '#') && (job != '$')) {
             //exec it
             ExecJob(job, pthread_self());
         }
     }
 
+    if (pthread_mutex_lock(&(countFinishedLock)) != 0) {
+        perror("failed locking mutex");
+    }
+
+    numThredFinishe++;
+
+    if (pthread_mutex_unlock(&(countFinishedLock)) != 0) {
+        perror("failed locking mutex");
+    }
     WriteToResultFile();
     pthread_exit((void *) 0);
 }
@@ -252,8 +295,10 @@ char NextJob() {
     //get the job
     if (queue.numJobs > 0) {
         temp = queue.jobs[queue.location];
-        queue.location++;
-        queue.numJobs--;
+        if(temp != '$') {
+            queue.location++;
+            queue.numJobs--;
+        }
     }
     //release the lock
     if (pthread_mutex_unlock(&(threadPool.queueAccessLock)) != 0) {
@@ -321,6 +366,9 @@ void ExecJob(char job, pthread_t tid) {
     }
 }
 
+/**
+ * the operation - write the current internal_count to the file
+ */
 void WriteToResultFile() {
 
     //init buffers
@@ -365,7 +413,6 @@ void WriteToResultFile() {
     strcat(finalDetails, inCounterDescription);
     strcat(finalDetails, "\n");
 
-    printf("write to file %d\n",outputFile);
     //write this string
     writen = write(outputFile, finalDetails, strlen(finalDetails));
     if (writen < 0) {
@@ -375,6 +422,9 @@ void WriteToResultFile() {
     }
 }
 
+/**
+ * the operation - clear all the server resources
+ */
 void ClearResources() {
     /*delete semaphores*/
 
@@ -460,6 +510,10 @@ void EndGame() {
     WriteToResultFile();
     //clear all resources
     ClearResources();
+
+    memset(queue.jobs, '0', queue.size);
+    queue.numJobs = 0;
+    queue.location = 0;
 }
 
 /**
@@ -472,8 +526,17 @@ void WaitAndEndGame() {
         EnterJobToQueue('$');
     }
 
+
+    while (numThredFinishe != 5) {
+
+    }
+    numThredFinishe = 0;
     WriteToResultFile();
     ClearResources();
+
+    memset(queue.jobs, '0', queue.size);
+    queue.numJobs = 0;
+    queue.location = 0;
 }
 
 /**

@@ -15,6 +15,7 @@
 
 #define SHM_SIZE 4096
 
+///declare the variables
 union semun {
     int val;
     struct semid_ds *buf;
@@ -41,9 +42,10 @@ union semun arg;
 struct semid_ds buf;
 struct sembuf sb;
 int semid;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wmissing-noreturn"
 
+/**
+ * the operation - the main function
+ */
 int main() {
 
     char dummy;
@@ -71,6 +73,7 @@ int main() {
         perror("shmat");
         exit(1);
     }
+    //run in loop that gets the action and perform it
     do {
 
         /*if (read(STDIN_FILENO, &move, 1) < 0) {
@@ -111,9 +114,10 @@ int main() {
         if (move == 'i') { //todo need capital letters?
             EndProgram();
         } else {
-            *data = move;
-            //add item
 
+            //add item
+            *data = move;
+            //free all semaphors
             sb.sem_num = 0;
             sb.sem_op = 1;
             sb.sem_flg = SEM_UNDO;
@@ -138,8 +142,10 @@ int main() {
     return 0;
 }
 
-#pragma clang diagnostic pop
-
+/**
+ * the input - a flag if we need to wait
+ * the operation - sets all the semaphors
+ */
 void SetSems(int check) {
 
     if (check == 1) {
@@ -196,6 +202,9 @@ void SetSems(int check) {
     }
 }
 
+/**
+ * the operation - release all resources and exit the program
+ */
 void EndProgram() {
 
     if (shmdt(memory) < 0) {
