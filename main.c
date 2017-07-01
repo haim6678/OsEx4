@@ -550,7 +550,6 @@ void WaitAndEndGame() {
     }
     while (numThredFinishe != 5) {
     }
-    numThredFinishe = 0;
     WriteToResultFile(1);
     ClearResources();
     exit(0);

@@ -56,7 +56,8 @@ int semid;
 int main() {
 
     char dummy;
-    int afterReset = 1;
+    char temp[2];
+    int numRead =0;
     SetSems(0);
 
     /*create memory*/
@@ -110,10 +111,15 @@ int main() {
             exit(0);
         }
         //get input
-        scanf("%c%c", &move, &dummy);
-        if ((move != 'i') && (move != 'I')) {
+        do{
+            if(read(STDIN_FILENO,&temp[numRead %2],1)<0){
+                perror("failed to read input");
+            }
+            numRead ++;
+        }while (temp[(numRead-1) %2]!= '\n');
+        if ((move != 'i') && (move != 'I') && (numRead ==2)) {
             //add item
-            *data = move;
+            *data = temp[0];
         }
         //free all semaphors
         sb.sem_num = 0;
@@ -136,7 +142,7 @@ int main() {
         if ((move == 'g') || (move == 'h') || (move == 'H') || (move == 'G')||(move == 'i')&&(move == 'I')) {
             EndProgram();
         }
-
+        numRead =0;
     } while (1);
     return 0;
 }
