@@ -1,6 +1,13 @@
-//
-// Created by haim on 10/06/17.
-//
+/******************************************
+*
+Student name: Haim Rubinstein
+*
+Student ID: 203405386
+*
+Course Exercise Group:01
+*
+Exercise name:Ex41
+******************************************/
 
 #include <stdio.h>
 #include <sys/types.h>
@@ -75,69 +82,61 @@ int main() {
     }
     //run in loop that gets the action and perform it
     do {
-
-        /*if (read(STDIN_FILENO, &move, 1) < 0) {
-            perror("failed to read from stdin");
-            //todo ReleaseMemoryEndExit();
-        }*/
         sb.sem_num = 0;
         sb.sem_op = -1;
         sb.sem_flg = SEM_UNDO;
-        //try locking the semaphore-dont stop
-        do {
-            //try close(=wait) writer
-            if (semop(writeId, &sb, 1) < 0) {
-                if (errno == EIDRM) {
-                    SetSems(1);
-                    afterReset = 0;
-                } else {
-                    perror("failed semop write");
-                    EndProgram();
-                }
+        //try close(=wait) writer
+        if (semop(writeId, &sb, 1) < 0) {
+            if ((errno == EIDRM) || (errno == EINVAL)) {
+                EndProgram();
             } else {
-                afterReset = 1;
+                perror("failed semop write");
+                EndProgram();
             }
-        } while (afterReset != 1);
-        //close third(inner) sem
-        if (semop(thirdMutexId, &sb, 1) < 0) {
-            perror("failed semop inner");
-            EndProgram();
         }
 
+        //close third(inner) sem
+        if (semop(thirdMutexId, &sb, 1) < 0) {
+            if ((errno == EIDRM) || (errno == EINVAL)) {
+                EndProgram();
+            } else {
+                perror("failed semop write");
+                EndProgram();
+            }
+        }
         /*ask user for input*/
         if (write(STDOUT_FILENO, "Please enter request code\n", strlen("Please enter request code\n")) < 0) {
             perror("failed to write to screen");
             exit(0);
         }
-
+        //get input
         scanf("%c%c", &move, &dummy);
-        if (move == 'i') { //todo need capital letters?
-            EndProgram();
-        } else {
-
+        if ((move != 'i') && (move != 'I')) {
             //add item
             *data = move;
-            //free all semaphors
-            sb.sem_num = 0;
-            sb.sem_op = 1;
-            sb.sem_flg = SEM_UNDO;
-
-            //release third sem
-            if (semop(thirdMutexId, &sb, 1) < 0) {
-                perror("failed semop in");
-                EndProgram();
-            }
-
-            // release reader
-            if (semop(readId, &sb, 1) < 0) {
-                perror("failed semop read");
-                EndProgram();
-            }
-
-            if ((move == 'g') || (move == 'h')) { //todo need capital letters?
-                SetSems(1);
-            }
         }
+        //free all semaphors
+        sb.sem_num = 0;
+        sb.sem_op = 1;
+        sb.sem_flg = SEM_UNDO;
+
+        //release third sem
+        if (semop(thirdMutexId, &sb, 1) < 0) {
+            perror("failed semop in");
+            EndProgram();
+        }
+
+        // release reader
+        if (semop(readId, &sb, 1) < 0) {
+            perror("failed semop read");
+            EndProgram();
+        }
+
+        //check if need to finish
+        if ((move == 'g') || (move == 'h') || (move == 'H') || (move == 'G')||(move == 'i')&&(move == 'I')) {
+            EndProgram();
+        }
+
     } while (1);
     return 0;
 }
@@ -149,7 +148,7 @@ int main() {
 void SetSems(int check) {
 
     if (check == 1) {
-        sleep(4);
+        sleep(3);
     }
     /*write semaphore*/
 
@@ -208,8 +207,6 @@ void SetSems(int check) {
 void EndProgram() {
 
     if (shmdt(memory) < 0) {
-        perror("failed detach memory");
     }
-
     exit(0);
 }

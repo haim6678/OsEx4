@@ -1,3 +1,14 @@
+/******************************************
+*
+Student name: Haim Rubinstein
+*
+Student ID: 203405386
+*
+Course Exercise Group:01
+*
+Exercise name:Ex42
+******************************************/
+
 #include <stdio.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -71,7 +82,7 @@ void ListenTOjobs();
 
 void WaitAndEndGame();
 
-void WriteToResultFile();
+void WriteToResultFile(int flag);
 
 void ClearResources();
 
@@ -82,8 +93,8 @@ struct sembuf sb;
 struct Queue queue;
 struct thpool threadPool;
 char *data;
-pthread_mutex_t countFinishedLock;
-pthread_mutexattr_t countFinishedAttr;
+pthread_mutex_t countFinishedLock, fileLock;
+pthread_mutexattr_t countFinishedAttr, fileLockAttr;
 int semaphoreSemId, readSemId, queueSemaphoreK, writeSemaphoreK;
 int writeSemId, readSemaphoreK, outputSemaphoreK, outputFile, shmKey, shmid;
 int writeSemaphoreDesc, readSemaphoreDesc, semaphoreDesc, semaphoreK;
@@ -177,7 +188,7 @@ void EnterJobToQueue(char job) {
 void ListenTOjobs() {
     char job;
 
-    while (1) {//todo when to finish?
+    while (1) {
         //get the jobs from memory
         //init vals for action
         sb.sem_num = 0;
@@ -199,8 +210,6 @@ void ListenTOjobs() {
 
         //get the job
         job = *data;
-
-
         semarg.val = 0;
         if (semctl(readSemId, 0, SETVAL, semarg) < 0) {
             perror("failed to set semaphore val");
@@ -216,10 +225,8 @@ void ListenTOjobs() {
 
         if ((job == 'g') || (job == 'G')) {
             EndGame();
-            SetSems();
         } else if ((job == 'h') || (job == 'H')) {
             WaitAndEndGame();
-            SetSems();
         } else {
             EnterJobToQueue(job);
             if (semop(semaphoreSemId, &sb, 1) < 0) {
@@ -269,13 +276,11 @@ void *ThreadFunc() {
     if (pthread_mutex_lock(&(countFinishedLock)) != 0) {
         perror("failed locking mutex");
     }
-
     numThredFinishe++;
-
     if (pthread_mutex_unlock(&(countFinishedLock)) != 0) {
         perror("failed locking mutex");
     }
-    WriteToResultFile();
+    WriteToResultFile(1);
     pthread_exit((void *) 0);
 }
 
@@ -295,7 +300,7 @@ char NextJob() {
     //get the job
     if (queue.numJobs > 0) {
         temp = queue.jobs[queue.location];
-        if(temp != '$') {
+        if (temp != '$') {
             queue.location++;
             queue.numJobs--;
         }
@@ -346,7 +351,7 @@ void ExecJob(char job, pthread_t tid) {
             break;
         case 'f':
         case 'F':
-            WriteToResultFile();
+            WriteToResultFile(1);
             break;
         default:
             break;
@@ -369,7 +374,7 @@ void ExecJob(char job, pthread_t tid) {
 /**
  * the operation - write the current internal_count to the file
  */
-void WriteToResultFile() {
+void WriteToResultFile(int flag) {
 
     //init buffers
     int writen;
@@ -413,8 +418,18 @@ void WriteToResultFile() {
     strcat(finalDetails, inCounterDescription);
     strcat(finalDetails, "\n");
 
+    if (flag == 1) {
+        if (pthread_mutex_lock(&(fileLock)) != 0) {
+            perror("failed locking mutex");
+        }
+    }
     //write this string
     writen = write(outputFile, finalDetails, strlen(finalDetails));
+    if (flag == 1) {
+        if (pthread_mutex_unlock(&(fileLock)) != 0) {
+            perror("failed unlocking mutex");
+        }
+    }
     if (writen < 0) {
         perror("failed to write to file");
         ClearResources();
@@ -477,17 +492,28 @@ void ClearResources() {
     if (pthread_mutex_destroy(&(threadPool.counterLock)) < 0) {
         perror("failed destroy mutex");
     }
-
     //sec mutex
     if (pthread_mutex_destroy(&(threadPool.queueAccessLock)) < 0) {
+        perror("failed destroy mutex");
+    }
+    if (pthread_mutex_destroy(&(fileLock)) < 0) {
         perror("failed destroy mutex");
     }
 
     if (pthread_mutexattr_destroy(&(threadPool.counterLockAttr)) < 0) {
         perror("failed destroy mutex");
     }
+    if (pthread_mutexattr_destroy(&(fileLockAttr)) < 0) {
+        perror("failed destroy mutex");
+    }
     if (pthread_mutexattr_destroy(&(threadPool.queueLOckAttr)) < 0) {
         perror("failed destroy mutex");
+    }
+
+    /* remove memory */
+    if (shmctl(shmid, IPC_RMID, NULL) == -1) {
+        perror("shmctl");
+        exit(1);
     }
 }
 
@@ -507,13 +533,10 @@ void EndGame() {
     }
 
     //write the file the result
-    WriteToResultFile();
+    WriteToResultFile(0);
     //clear all resources
     ClearResources();
-
-    memset(queue.jobs, '0', queue.size);
-    queue.numJobs = 0;
-    queue.location = 0;
+    exit(0);
 }
 
 /**
@@ -525,18 +548,12 @@ void WaitAndEndGame() {
     for (i; i < 5; i++) {
         EnterJobToQueue('$');
     }
-
-
     while (numThredFinishe != 5) {
-
     }
     numThredFinishe = 0;
-    WriteToResultFile();
+    WriteToResultFile(1);
     ClearResources();
-
-    memset(queue.jobs, '0', queue.size);
-    queue.numJobs = 0;
-    queue.location = 0;
+    exit(0);
 }
 
 /**
@@ -547,6 +564,23 @@ void CreatePool() {
     int i = 0;
     pthread_t tid;
     pthread_mutexattr_t atrr;
+
+    //the file lock
+    if ((pthread_mutexattr_init(&(fileLockAttr)) < 0)) {
+        perror("failed init mutex attr");
+        exit(1);
+    }
+
+    //set the mutex attr.
+    if ((pthread_mutexattr_settype(&(fileLockAttr), PTHREAD_MUTEX_ERRORCHECK)) < 0) {
+        perror("failed setting mutex attr");
+        exit(1);
+    }
+    //init the mutex
+    if (pthread_mutex_init((&fileLock), (&(fileLockAttr))) != 0) {
+        perror("faile creating mutex");
+        exit(1);
+    }
 
     //the queue lock
     if ((pthread_mutexattr_init(&(threadPool.queueLOckAttr)) < 0)) {
@@ -693,7 +727,7 @@ void CreateKeys() {
  */
 void CreateMemory() {
     //create the output file.
-    if ((outputFile = open("203405386.txt", O_RDWR | O_CREAT, 0666)) == -1) {
+    if ((outputFile = open("203405386.txt", O_RDWR | O_CREAT | O_TRUNC, 0666)) == -1) {
         perror("failed open file");
         exit(0);
     }
